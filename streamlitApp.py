@@ -1,24 +1,92 @@
-# app.py
-# Streamlit dashboard for Customer Value Prediction & Segmentation
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
-
 import plotly.express as px
-
 from sklearn.preprocessing import MinMaxScaler
 
-CLV_MODEL_PATH = Path("CustomerValueModel.keras")
+PX_TEMPLATE = "plotly_white"  # شكل خفيف للتشارتس
+
+
+# ───────────────────────────────────────────────
+# Helpers
+# ───────────────────────────────────────────────
+def style_dataframe(df: pd.DataFrame, precision: int = 2):
+    """تنسيق موحّد احترافي لأي جدول في الداشبورد."""
+    return (
+        df.style
+        .format(precision=precision)
+        .set_properties(
+            **{
+                "color": "black",
+                "font-size": "15px",
+                "border-color": "#E0E0E0",
+            }
+        )
+        .set_table_styles(
+            [
+                {
+                    "selector": "th",
+                    "props": [
+                        ("font-size", "16px"),
+                        ("color", "black"),
+                        ("font-weight", "600"),
+                        ("background-color", "#F5F5F5"),
+                    ],
+                },
+                {
+                    "selector": "td",
+                    "props": [
+                        ("color", "black"),
+                        ("background-color", "white"),
+                    ],
+                },
+            ]
+        )
+    )
+
+
+def tidy_fig(fig, title: str = None):
+    """تنسيق موحّد للتشارتس."""
+    if title is not None:
+        fig.update_layout(title=title)
+    fig.update_layout(
+        template=PX_TEMPLATE,
+        margin=dict(l=0, r=0, t=40, b=0),
+        font=dict(size=13, color="black"),
+    )
+    return fig
+
+
+# ───────────────────────────────────────────────
+# Load Data
+# ───────────────────────────────────────────────
+@st.cache_data
+def load_country_mapping():
+    """
+    Build a mapping CustomerID -> Country name
+    from Online Retail.xlsx (most frequent country per customer).
+    """
+    excel_path = Path("Online Retail.xlsx")
+    if not excel_path.exists():
+        return None
+
+    raw = pd.read_excel(excel_path, usecols=["CustomerID", "Country"])
+    raw = raw.dropna(subset=["CustomerID", "Country"])
+
+    raw["CustomerID"] = raw["CustomerID"].astype(int)
+
+    mapping = (
+        raw.groupby("CustomerID")["Country"]
+        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else s.iloc[0])
+    )
+
+    return mapping
 
 
 @st.cache_data
 def load_data():
-    """
-    Load customer-level dataset with segments.
-    Prefer customers_with_segments.csv, fall back to final_df.csv.
-    """
+    """قراءة الداتا الرئيسية + استرجاع أسماء البلاد الحقيقية."""
     if Path("customers_with_segments.csv").exists():
         df = pd.read_csv("customers_with_segments.csv")
     elif Path("final_df.csv").exists():
@@ -28,22 +96,27 @@ def load_data():
             "No customers_with_segments.csv or final_df.csv found in project root."
         )
 
-    if "kmeans_cluster" not in df.columns:
-        st.warning("kmeans_cluster column not found – clustering labels are missing.")
-    if "gmm_cluster" not in df.columns:
-        st.info("gmm_cluster column not found – GMM labels will be hidden.")
+    if "CustomerID" in df.columns:
+        country_map = load_country_mapping()
+        if country_map is not None:
+            df = df.copy()
+            df["CustomerID"] = df["CustomerID"].astype(int)
+            df["Country_name"] = df["CustomerID"].map(country_map)
+            df["Country"] = df["Country_name"].fillna(df.get("Country"))
+            df.drop(columns=["Country_name"], inplace=True)
 
     return df
 
 
+# ───────────────────────────────────────────────
+# Compute Behavioral Score + CLV Score
+# ───────────────────────────────────────────────
 @st.cache_data
 def compute_behavioral_scores(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create a simple behavioral score between 0 and 100
-    using scaled RFM + behavioral features.
-    """
+    """حساب behavioral_score و CLV_score."""
     df = df.copy()
 
+    # behavioral_score
     feature_cols = [
         "Recency",
         "Frequency",
@@ -55,19 +128,25 @@ def compute_behavioral_scores(df: pd.DataFrame) -> pd.DataFrame:
         "is_weekend",
     ]
     existing = [c for c in feature_cols if c in df.columns]
-    if not existing:
-        return df
+    if existing:
+        scaler = MinMaxScaler()
+        scaled = scaler.fit_transform(df[existing])
+        df["behavioral_score"] = (scaled.mean(axis=1) * 100).round(1)
 
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df[existing])
+    # CLV_score = scaled(Frequency × Monetary)
+    if all(c in df.columns for c in ["Frequency", "Monetary"]):
+        raw_clv = df["Frequency"] * df["Monetary"]
+        clv_scaler = MinMaxScaler()
+        clv_norm = clv_scaler.fit_transform(raw_clv.values.reshape(-1, 1)).reshape(-1)
+        df["CLV_score"] = (clv_norm * 100).round(1)
 
-    # simple average score
-    score = scaled.mean(axis=1)
-    df["behavioral_score"] = (score * 100).round(1)
     return df
 
 
-def sidebar_info(df: pd.DataFrame):
+# ───────────────────────────────────────────────
+# Sidebar Info
+# ───────────────────────────────────────────────
+def sidebar_info(df):
     st.sidebar.markdown("### Dataset Overview")
     st.sidebar.write(f"**Customers:** {df['CustomerID'].nunique():,}")
     if "kmeans_cluster" in df.columns:
@@ -76,23 +155,23 @@ def sidebar_info(df: pd.DataFrame):
         st.sidebar.write(f"**GMM segments:** {df['gmm_cluster'].nunique()}")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Page 1 – Customer Lookup & Real-Time Behavioral Scoring
-# ──────────────────────────────────────────────────────────────────────────────
-def page_customer_lookup(df: pd.DataFrame):
+# ───────────────────────────────────────────────
+# PAGE 1 – Customer Lookup
+# ───────────────────────────────────────────────
+def page_customer_lookup(df):
+
     st.header("🔎 Customer Lookup & Behavioral Scoring")
 
-    customer_ids = sorted(df["CustomerID"].unique())
-    selected_id = st.selectbox("Select Customer ID", customer_ids)
-
+    selected_id = st.selectbox("Select Customer ID", sorted(df["CustomerID"].unique()))
     row = df[df["CustomerID"] == selected_id].iloc[0]
 
     col1, col2 = st.columns(2)
+
     with col1:
         st.subheader("Customer Info")
         st.write(f"**Customer ID:** {int(row['CustomerID'])}")
         if "Country" in df.columns:
-            st.write(f"**Country:** {row.get('Country', 'N/A')}")
+            st.write(f"**Country:** {row['Country']}")
         if "kmeans_cluster" in df.columns:
             st.write(f"**KMeans Segment:** {int(row['kmeans_cluster'])}")
         if "gmm_cluster" in df.columns:
@@ -101,15 +180,10 @@ def page_customer_lookup(df: pd.DataFrame):
     with col2:
         st.subheader("Behavioral Score")
         if "behavioral_score" in df.columns:
-            st.metric(
-                label="Behavioral Score (0–100)",
-                value=row["behavioral_score"],
-            )
-        else:
-            st.info("Behavioral score not computed.")
+            st.metric("Behavioral Score (0–100)", row["behavioral_score"])
 
     st.subheader("RFM & Behavioral Features")
-    cols_to_show = [
+    cols = [
         c
         for c in [
             "Recency",
@@ -123,262 +197,208 @@ def page_customer_lookup(df: pd.DataFrame):
         ]
         if c in df.columns
     ]
-    st.write(row[cols_to_show])
+
+    rfm_df = row[cols].to_frame(name="Value")
+    st.dataframe(
+        style_dataframe(rfm_df, precision=3),
+        use_container_width=True,
+    )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Page 2 – Segment Explorer with Filters
-# ──────────────────────────────────────────────────────────────────────────────
-def page_segment_explorer(df: pd.DataFrame):
+# ───────────────────────────────────────────────
+# PAGE 2 – Segment Explorer
+# ───────────────────────────────────────────────
+def page_segment_explorer(df):
+
     st.header("🧩 Segment Explorer")
 
     if "kmeans_cluster" not in df.columns:
-        st.error("kmeans_cluster column is missing – cannot explore segments.")
+        st.error("Missing kmeans_cluster")
         return
 
     col1, col2 = st.columns(2)
+
     with col1:
         segment = st.selectbox(
             "Select KMeans Segment",
             sorted(df["kmeans_cluster"].unique()),
             format_func=lambda x: f"Segment {x}",
         )
-    with col2:
-        country_filter = (
-            st.selectbox(
-                "Filter by Country (optional)",
-                ["All"] + sorted(df["Country"].dropna().unique().tolist())
-                if "Country" in df.columns
-                else ["All"],
-            )
-            if "Country" in df.columns
-            else "All"
-        )
 
-    seg_df = df[df["kmeans_cluster"] == segment].copy()
+    with col2:
+        if "Country" in df.columns:
+            country_filter = st.selectbox(
+                "Filter by Country",
+                ["All"] + sorted(df["Country"].dropna().unique().tolist()),
+            )
+        else:
+            country_filter = "All"
+
+    seg_df = df[df["kmeans_cluster"] == segment]
     if country_filter != "All" and "Country" in seg_df.columns:
         seg_df = seg_df[seg_df["Country"] == country_filter]
 
     st.subheader("Segment KPIs")
-    col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("Customers", f"{seg_df['CustomerID'].nunique():,}")
-    if "Monetary" in df.columns:
-        col_b.metric("Avg Monetary", f"{seg_df['Monetary'].mean():.2f}")
-    if "Frequency" in df.columns:
-        col_c.metric("Avg Frequency", f"{seg_df['Frequency'].mean():.2f}")
-    if "purchase_flag" in df.columns:
-        col_d.metric(
-            "Conversion Rate",
-            f"{100 * seg_df['purchase_flag'].mean():.1f}%",
-        )
+    c1, c2, c3, c4 = st.columns(4)
 
-    st.subheader("RFM Distribution in Selected Segment")
+    c1.metric("Customers", f"{seg_df['CustomerID'].nunique():,}")
+    if "Monetary" in seg_df.columns:
+        c2.metric("Avg Monetary", f"{seg_df['Monetary'].mean():.2f}")
+    if "Frequency" in seg_df.columns:
+        c3.metric("Avg Frequency", f"{seg_df['Frequency'].mean():.2f}")
+    if "purchase_flag" in seg_df.columns:
+        c4.metric("Conversion Rate", f"{seg_df['purchase_flag'].mean()*100:.1f}%")
+
+    st.subheader("RFM Distribution")
     rfm_cols = [c for c in ["Recency", "Frequency", "Monetary"] if c in seg_df.columns]
     if rfm_cols:
-        fig = px.box(
-            seg_df,
-            y=rfm_cols,
-            points="outliers",
-            title="RFM Boxplots",
-        )
+        fig = px.box(seg_df, y=rfm_cols, points="outliers")
+        tidy_fig(fig, "RFM Boxplots")
         st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Segment Size by Country")
     if "Country" in seg_df.columns:
-        country_counts = seg_df["Country"].value_counts().reset_index()
-        country_counts.columns = ["Country", "Customers"]
-        fig2 = px.bar(
-            country_counts,
-            x="Country",
-            y="Customers",
-            title="Customers per Country in this Segment",
-        )
+        st.subheader("Segment Size by Country")
+        counts = seg_df["Country"].value_counts().reset_index()
+        counts.columns = ["Country", "Customers"]
+        fig2 = px.bar(counts, x="Country", y="Customers")
+        tidy_fig(fig2, "Customers per Country in this Segment")
         st.plotly_chart(fig2, use_container_width=True)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Page 3 – Campaign Performance Simulator with ROI
-# ──────────────────────────────────────────────────────────────────────────────
-def page_campaign_simulator(df: pd.DataFrame):
+# ───────────────────────────────────────────────
+# PAGE 3 – Campaign Simulator
+# ───────────────────────────────────────────────
+def page_campaign_simulator(df):
+
     st.header("📈 Campaign Performance Simulator & ROI")
 
-    if "kmeans_cluster" not in df.columns or "Monetary" not in df.columns:
-        st.error("Need kmeans_cluster and Monetary columns for simulation.")
+    if "kmeans_cluster" not in df.columns:
+        st.error("Missing kmeans_cluster")
         return
 
     segment = st.selectbox(
-        "Target KMeans Segment",
-        sorted(df["kmeans_cluster"].unique()),
-        format_func=lambda x: f"Segment {x}",
+        "Target Segment", sorted(df["kmeans_cluster"].unique())
     )
 
     seg_df = df[df["kmeans_cluster"] == segment]
 
     st.markdown("### Assumptions")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        target_customers = col1.number_input(
-            "Number of customers to target",
-            min_value=100,
-            max_value=int(seg_df["CustomerID"].nunique()),
-            value=min(1000, int(seg_df["CustomerID"].nunique())),
-            step=100,
-        )
-    with col2:
-        uplift = col2.number_input(
-            "Expected uplift in conversion (%)",
-            min_value=0.0,
-            max_value=100.0,
-            value=5.0,
-            step=0.5,
-        )
-    with col3:
-        cost_per_customer = col3.number_input(
-            "Campaign cost per customer",
-            min_value=0.0,
-            value=0.5,
-            step=0.1,
-        )
+    c1, c2, c3 = st.columns(3)
+
+    target_customers = c1.number_input(
+        "Target customers",
+        100,
+        int(seg_df["CustomerID"].nunique()),
+        min(1000, int(seg_df["CustomerID"].nunique())),
+        100,
+    )
+    uplift = c2.number_input("Conversion uplift (%)", 0.0, 100.0, 5.0)
+    cost = c3.number_input("Cost per customer", 0.0, 100.0, 0.5)
 
     base_conv = seg_df["purchase_flag"].mean() if "purchase_flag" in seg_df.columns else 0.1
-    avg_order_value = seg_df["Monetary"].mean()
+    avg_order = seg_df["Monetary"].mean() if "Monetary" in seg_df.columns else 1.0
 
-    st.markdown("### Results")
-
-    # expected conversions after uplift
     uplift_factor = 1 + uplift / 100.0
     expected_conv_rate = base_conv * uplift_factor
-    expected_conversions = target_customers * expected_conv_rate
-    expected_revenue = expected_conversions * avg_order_value
-    total_cost = target_customers * cost_per_customer
-    roi = (expected_revenue - total_cost) / total_cost if total_cost > 0 else 0.0
+    conversions = target_customers * expected_conv_rate
+    revenue = conversions * avg_order
+    total_cost = target_customers * cost
+    roi = (revenue - total_cost) / total_cost if total_cost else 0
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Base conversion rate", f"{100 * base_conv:.1f}%")
-    c2.metric("Expected conversion rate", f"{100 * expected_conv_rate:.1f}%")
-    c3.metric("Expected revenue", f"{expected_revenue:.2f}")
-    c4.metric("ROI", f"{100 * roi:.1f}%")
-
-    st.info(
-        "This simulator uses historical conversion rate and average monetary value "
-        "for the selected segment, then applies your uplift and cost assumptions."
-    )
+    st.subheader("Results")
+    colA, colB, colC, colD = st.columns(4)
+    colA.metric("Base Conversion", f"{base_conv*100:.1f}%")
+    colB.metric("Expected Conversion", f"{expected_conv_rate*100:.1f}%")
+    colC.metric("Expected Revenue", f"{revenue:.2f}")
+    colD.metric("ROI", f"{roi*100:.1f}%")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Page 4 – Customer Lifetime Value (CLV) Forecasting
-# ──────────────────────────────────────────────────────────────────────────────
-def page_clv_dashboard(df: pd.DataFrame):
+# ───────────────────────────────────────────────
+# PAGE 4 – CLV Dashboard (Heuristic)
+# ───────────────────────────────────────────────
+def page_clv_dashboard(df):
+
     st.header("💰 Customer Lifetime Value (CLV) Dashboard")
 
-    used_cols = [c for c in ["Recency", "Frequency", "Monetary"] if c in df.columns]
-    if not used_cols:
-        st.error("Need Recency, Frequency and Monetary columns for CLV.")
-        return
+    # لو مش موجود من compute_behavioral_scores نحسبه هنا
+    if "CLV_score" not in df.columns:
+        if not all(c in df.columns for c in ["Frequency", "Monetary"]):
+            st.error("Missing Frequency/Monetary for CLV.")
+            return
+        raw_clv = df["Frequency"] * df["Monetary"]
+        scaler = MinMaxScaler()
+        df["CLV_score"] = (
+            scaler.fit_transform(raw_clv.values.reshape(-1, 1)).reshape(-1) * 100
+        ).round(1)
 
-    # try to load keras model if present
-    clv_model = None
-    if CLV_MODEL_PATH.exists():
-        try:
-            from tensorflow.keras.models import load_model
-
-            clv_model = load_model(CLV_MODEL_PATH)
-            st.success("Loaded CLV model from CustomerValueModel.keras")
-        except Exception as e:
-            st.warning(f"Could not load CLV model: {e}")
-
-    features = df[used_cols].values
-
-    if clv_model is not None:
-        # model-based CLV prediction
-        clv_raw = clv_model.predict(features)
-        clv_scores = clv_raw.reshape(-1)
-    else:
-        # simple heuristic CLV: Frequency * Monetary with scaling
-        clv_scores = (df["Frequency"] * df["Monetary"]).values
-
-    scaler = MinMaxScaler()
-    clv_norm = scaler.fit_transform(clv_scores.reshape(-1, 1)).reshape(-1)
-    df["CLV_score"] = (clv_norm * 100).round(1)
-
-    st.subheader("CLV Score Distribution")
-    fig = px.histogram(
-        df,
-        x="CLV_score",
-        nbins=30,
-        title="Distribution of CLV Scores",
-    )
+    fig = px.histogram(df, x="CLV_score", nbins=30)
+    tidy_fig(fig, "Distribution of CLV Scores")
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Top Customers by CLV")
-    top_n = st.slider("Show top N customers", 10, 200, 50, step=10)
-    top_df = df.sort_values("CLV_score", ascending=False).head(top_n)
-    st.dataframe(top_df[["CustomerID", "CLV_score", "Monetary", "Frequency"]])
-
-    st.info(
-        "CLV_score is scaled between 0 and 100. "
-        "If a trained model is available it is used, otherwise a heuristic based on Frequency × Monetary is applied."
-    )
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Page 5 – Export Marketing Lists
-# ──────────────────────────────────────────────────────────────────────────────
-def page_export_lists(df: pd.DataFrame):
-    st.header("📤 Export Segment-Based Marketing Lists")
-
-    if "kmeans_cluster" not in df.columns:
-        st.error("kmeans_cluster column is required to export segments.")
-        return
-
-    segs = sorted(df["kmeans_cluster"].unique())
-    selected_segs = st.multiselect(
-        "Select segments to export",
-        segs,
-        default=segs,
-        format_func=lambda x: f"Segment {x}",
-    )
-
-    min_behavior_score = 0.0
-    if "behavioral_score" in df.columns:
-        min_behavior_score = st.slider(
-            "Minimum behavioral score (0–100)",
-            0.0,
-            100.0,
-            30.0,
-            step=5.0,
-        )
-
-    export_df = df[df["kmeans_cluster"].isin(selected_segs)].copy()
-    if "behavioral_score" in export_df.columns:
-        export_df = export_df[export_df["behavioral_score"] >= min_behavior_score]
-
-    st.write(f"Selected customers: {export_df['CustomerID'].nunique():,}")
-
-    cols = ["CustomerID", "kmeans_cluster", "gmm_cluster"] if "gmm_cluster" in df.columns else ["CustomerID", "kmeans_cluster"]
-    if "behavioral_score" in df.columns:
-        cols.append("behavioral_score")
-    if "CLV_score" in df.columns:
-        cols.append("CLV_score")
+    top_n = st.slider("Top N", 10, 200, 50)
+    cols = ["CustomerID", "CLV_score", "Monetary", "Frequency"]
     if "Country" in df.columns:
         cols.append("Country")
 
-    export_view = export_df[cols].drop_duplicates()
-    st.dataframe(export_view)
-
-    csv_bytes = export_view.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="Download CSV marketing list",
-        data=csv_bytes,
-        file_name="marketing_list.csv",
-        mime="text/csv",
+    top_df = df.sort_values("CLV_score", ascending=False).head(top_n)[cols]
+    st.dataframe(
+        style_dataframe(top_df),
+        use_container_width=True,
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main app
-# ──────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# PAGE 5 – Export Marketing Lists
+# ───────────────────────────────────────────────
+def page_export_lists(df):
+
+    st.header("📤 Export Marketing Lists")
+
+    if "kmeans_cluster" not in df.columns:
+        st.error("kmeans_cluster is required.")
+        return
+
+    segs = sorted(df["kmeans_cluster"].unique())
+    selected = st.multiselect("Select Segments", segs, default=segs)
+
+    # لو behavioral_score موجود نستخدمه، لو مش موجود نسيبه 0
+    if "behavioral_score" in df.columns:
+        min_score = st.slider("Min Behavioral Score", 0.0, 100.0, 30.0)
+        data = df[df["kmeans_cluster"].isin(selected)]
+        data = data[data["behavioral_score"] >= min_score]
+    else:
+        st.info("behavioral_score not found – exporting all selected customers.")
+        data = df[df["kmeans_cluster"].isin(selected)]
+
+    export_cols = ["CustomerID", "kmeans_cluster"]
+
+    if "Country" in df.columns:
+        export_cols.append("Country")
+    if "behavioral_score" in df.columns:
+        export_cols.append("behavioral_score")
+    if "CLV_score" in df.columns:
+        export_cols.append("CLV_score")
+
+    out = data[export_cols].drop_duplicates()
+    st.dataframe(
+        style_dataframe(out),
+        use_container_width=True,
+    )
+
+    st.download_button(
+        "Download CSV",
+        out.to_csv(index=False),
+        "marketing_list.csv",
+        "text/csv",
+    )
+
+
+# ───────────────────────────────────────────────
+# MAIN APP
+# ───────────────────────────────────────────────
 def main():
+
     st.set_page_config(
         page_title="Customer Value & Segmentation Dashboard",
         layout="wide",
@@ -388,6 +408,7 @@ def main():
 
     df = load_data()
     df = compute_behavioral_scores(df)
+
     sidebar_info(df)
 
     pages = {
@@ -398,8 +419,8 @@ def main():
         "Export marketing lists": page_export_lists,
     }
 
-    page_name = st.sidebar.radio("Navigation", list(pages.keys()))
-    pages[page_name](df)
+    selection = st.sidebar.radio("Navigation", list(pages.keys()))
+    pages[selection](df)
 
 
 if __name__ == "__main__":
