@@ -5,14 +5,10 @@ from pathlib import Path
 import plotly.express as px
 from sklearn.preprocessing import MinMaxScaler
 
-PX_TEMPLATE = "plotly_white"  # شكل خفيف للتشارتس
+PX_TEMPLATE = "plotly_white" 
 
 
-# ───────────────────────────────────────────────
-# Helpers
-# ───────────────────────────────────────────────
 def style_dataframe(df: pd.DataFrame, precision: int = 2):
-    """تنسيق موحّد احترافي لأي جدول في الداشبورد."""
     return (
         df.style
         .format(precision=precision)
@@ -47,7 +43,6 @@ def style_dataframe(df: pd.DataFrame, precision: int = 2):
 
 
 def tidy_fig(fig, title: str = None):
-    """تنسيق موحّد للتشارتس."""
     if title is not None:
         fig.update_layout(title=title)
     fig.update_layout(
@@ -320,7 +315,6 @@ def page_clv_dashboard(df):
 
     st.header("💰 Customer Lifetime Value (CLV) Dashboard")
 
-    # لو مش موجود من compute_behavioral_scores نحسبه هنا
     if "CLV_score" not in df.columns:
         if not all(c in df.columns for c in ["Frequency", "Monetary"]):
             st.error("Missing Frequency/Monetary for CLV.")
@@ -362,7 +356,6 @@ def page_export_lists(df):
     segs = sorted(df["kmeans_cluster"].unique())
     selected = st.multiselect("Select Segments", segs, default=segs)
 
-    # لو behavioral_score موجود نستخدمه، لو مش موجود نسيبه 0
     if "behavioral_score" in df.columns:
         min_score = st.slider("Min Behavioral Score", 0.0, 100.0, 30.0)
         data = df[df["kmeans_cluster"].isin(selected)]
