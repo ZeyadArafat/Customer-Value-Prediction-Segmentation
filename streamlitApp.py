@@ -81,7 +81,6 @@ def load_country_mapping():
 
 @st.cache_data
 def load_data():
-    """قراءة الداتا الرئيسية + استرجاع أسماء البلاد الحقيقية."""
     if Path("customers_with_segments.csv").exists():
         df = pd.read_csv("customers_with_segments.csv")
     elif Path("final_df.csv").exists():
@@ -108,7 +107,6 @@ def load_data():
 # ───────────────────────────────────────────────
 @st.cache_data
 def compute_behavioral_scores(df: pd.DataFrame) -> pd.DataFrame:
-    """حساب behavioral_score و CLV_score."""
     df = df.copy()
 
     # behavioral_score
